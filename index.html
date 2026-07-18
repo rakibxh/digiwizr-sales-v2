@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Digiwizr Sales Tracker</title>
+
+<!-- PWA manifest -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#695EA9" />
+
+<!-- iOS: makes the app run full-screen with no browser chrome once installed -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Digiwizr Sales Tracker" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+
+<link rel="icon" href="icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Offline banner: shown/hidden by app.js when connection changes -->
+  <div id="offlineBanner" class="offline-banner">You are offline — data will sync when connected</div>
+
+  <!-- ============================================================
+       HEADER — persistent dark bar on every screen
+       ============================================================ -->
+  <header class="header">
+    <div class="header-row">
+      <button id="backBtn" class="back-btn" aria-label="Back" style="display:none;">&#8592;</button>
+      <img src="icon-512.png" alt="Digiwizr" class="header-logo" />
+    </div>
+    <div id="headerScreenTitle" class="header-screen-title" style="display:none;"></div>
+    <div id="headerBusinessName" class="header-business" style="display:none;"></div>
+  </header>
+
+  <!-- ============================================================
+       SCREEN 1 — FIRST TIME SETUP
+       ============================================================ -->
+  <section id="screen-setup" class="screen">
+    <p class="welcome-msg">Welcome to Digiwizr Sales Tracker</p>
+
+    <div id="setupMessage" class="message"></div>
+
+    <div class="field">
+      <label for="businessNameInput">Business Name</label>
+      <input type="text" id="businessNameInput" placeholder="e.g. Cedar Lane Bakery" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="phoneInput">Phone Number</label>
+      <input type="tel" id="phoneInput" placeholder="e.g. 01712345678" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="addressInput">Business Address (optional)</label>
+      <input type="text" id="addressInput" placeholder="Street, City (optional)" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="setupPinInput">Create a 4-digit PIN — you will enter this every time you open the app</label>
+      <input type="password" id="setupPinInput" placeholder="••••" inputmode="numeric" maxlength="4" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="setupPinConfirmInput">Confirm PIN</label>
+      <input type="password" id="setupPinConfirmInput" placeholder="••••" inputmode="numeric" maxlength="4" autocomplete="off" />
+    </div>
+
+    <button id="setupBtn" class="btn btn-primary btn-block">Set Up My Account</button>
+
+    <div id="setupSpinner" class="spinner-wrap" style="display:none;">
+      <div class="spinner"></div>
+    </div>
+
+    <button id="goToRecoveryFromSetup" class="link-btn">Already have an account? Recover it here</button>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 2 — ACCESS PIN ENTRY (daily login)
+       ============================================================ -->
+  <section id="screen-pin-entry" class="screen">
+    <div class="pin-card">
+      <p class="pin-card-label">Enter your 4-digit PIN</p>
+
+      <div id="pinEntryMessage" class="message"></div>
+
+      <input type="password" id="accessPinInput" class="pin-input" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off" />
+
+      <button id="unlockBtn" class="btn btn-primary btn-block">Unlock</button>
+
+      <button id="goToRecoveryFromPin" class="link-btn">Forgot PIN? Recover account</button>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 3 — ACCOUNT RECOVERY
+       ============================================================ -->
+  <section id="screen-recovery" class="screen">
+    <button id="recoveryBackLink" class="link-btn recovery-back-link">&#8592; Back</button>
+
+    <!-- Step 1: enter the recovery PIN -->
+    <div id="recoveryStep1">
+      <h1 class="screen-title">Account Recovery</h1>
+      <div class="field">
+        <label for="recoveryPinInput">Enter your 6-digit Recovery PIN</label>
+        <input type="text" id="recoveryPinInput" inputmode="numeric" maxlength="6" placeholder="••••••" autocomplete="off" />
+      </div>
+      <div id="recoveryMessage" class="message"></div>
+      <button id="recoverAccountBtn" class="btn btn-primary btn-block">Recover Account</button>
+    </div>
+
+    <!-- Step 2: set a new access PIN after a successful recovery -->
+    <div id="recoveryStep2" style="display:none;">
+      <h1 class="screen-title">Set a New PIN</h1>
+      <p class="subtext">Your account was found. Choose a new 4-digit PIN for this device.</p>
+      <div class="field">
+        <label for="newPinInput">New PIN</label>
+        <input type="password" id="newPinInput" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="newPinConfirmInput">Confirm New PIN</label>
+        <input type="password" id="newPinConfirmInput" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off" />
+      </div>
+      <div id="recoveryStep2Message" class="message"></div>
+      <button id="setNewPinBtn" class="btn btn-primary btn-block">Set New PIN</button>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 4 — HOME
+       ============================================================ -->
+  <section id="screen-home" class="screen">
+    <div id="homeMessage" class="message"></div>
+
+    <!-- Daily summary stat cards -->
+    <div class="stat-cards-row" id="statCardsRow">
+      <div class="stat-card">
+        <div class="stat-card-value shimmer" id="statSalesValue">&nbsp;</div>
+        <div class="stat-card-label">Today's Sales</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-value shimmer" id="statExpensesValue">&nbsp;</div>
+        <div class="stat-card-label">Today's Expenses</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-value shimmer" id="statCollectionsValue">&nbsp;</div>
+        <div class="stat-card-label">Today's Collections</div>
+      </div>
+    </div>
+
+    <!-- Pending sync badge -->
+    <div id="syncBadge" class="sync-badge">
+      <span id="syncBadgeText"></span>
+      <button id="syncNowBtn" class="sync-now-btn">Sync Now</button>
+    </div>
+
+    <div id="lastSyncedText" class="last-synced-text"></div>
+
+    <!-- Action cards -->
+    <div class="home-cards">
+      <div id="cardSale" class="home-card" role="button" tabindex="0">
+        <div class="icon">&#128722;</div>
+        <div class="label">Record a Sale</div>
+      </div>
+      <div id="cardExpense" class="home-card" role="button" tabindex="0">
+        <div class="icon">&#129534;</div>
+        <div class="label">Record an Expense</div>
+      </div>
+      <div id="cardCollections" class="home-card" role="button" tabindex="0">
+        <div class="icon">&#128176;</div>
+        <div class="label">Collections</div>
+      </div>
+    </div>
+
+    <button id="manageProductsLink" class="link-btn">Manage Products</button>
+
+    <!-- Recent entries -->
+    <h2 class="section-heading recent-entries-heading">Recent Entries</h2>
+    <div id="recentEntriesLoading" class="spinner-wrap">
+      <div class="spinner"></div>
+    </div>
+    <div id="recentEntriesList" class="recent-entries-list"></div>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 5 — RECORD A SALE
+       ============================================================ -->
+  <section id="screen-sale" class="screen">
+    <div id="saleMessage" class="message"></div>
+
+    <div id="saleFormFields" style="display:none;">
+      <div class="field">
+        <label for="quantityInput">Quantity <span class="required-mark">*</span></label>
+        <input type="number" id="quantityInput" min="1" placeholder="e.g. 2" inputmode="numeric" required />
+      </div>
+      <div class="field">
+        <label for="notesInput">Notes (optional)</label>
+        <input type="text" id="notesInput" placeholder="Add a note..." />
+      </div>
+      <button id="saveSaleBtn" class="btn btn-primary btn-block">Save Sale</button>
+    </div>
+
+    <h2 class="section-heading" id="saleProductHeading">Select a Product</h2>
+
+    <div id="saleLoading" class="spinner-wrap">
+      <div class="spinner"></div>
+    </div>
+
+    <div id="saleProductList" class="product-list"></div>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 6 — RECORD AN EXPENSE
+       ============================================================ -->
+  <section id="screen-expense" class="screen">
+    <div id="expenseMessage" class="message"></div>
+
+    <div class="field">
+      <label for="descriptionInput">Description</label>
+      <input type="text" id="descriptionInput" placeholder="e.g. Flour and sugar" />
+    </div>
+    <div class="field">
+      <label for="amountInput">Amount</label>
+      <input type="number" id="amountInput" min="0" step="0.01" placeholder="0.00" inputmode="decimal" />
+    </div>
+    <button id="saveExpenseBtn" class="btn btn-primary btn-block">Save Expense</button>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 7 — COLLECTIONS
+       ============================================================ -->
+  <section id="screen-collections" class="screen">
+    <div id="collectionsMessage" class="message"></div>
+
+    <div class="field">
+      <label for="collectionDescriptionInput">Description (optional)</label>
+      <input type="text" id="collectionDescriptionInput" placeholder="e.g. Due from March, Customer name" />
+    </div>
+    <div class="field">
+      <label for="collectionAmountInput">Amount</label>
+      <input type="number" id="collectionAmountInput" min="0" step="0.01" placeholder="0.00" inputmode="decimal" />
+    </div>
+    <button id="saveCollectionBtn" class="btn btn-primary btn-block">Save Collection</button>
+  </section>
+
+  <!-- ============================================================
+       SCREEN 8 — MANAGE PRODUCTS
+       ============================================================ -->
+  <section id="screen-products" class="screen">
+    <div id="productsMessage" class="message"></div>
+
+    <div class="add-product-form">
+      <div class="field">
+        <label for="newProductInput">Product Name</label>
+        <input type="text" id="newProductInput" placeholder="e.g. Sourdough Loaf" />
+      </div>
+      <div class="field">
+        <label for="newProductSizeInput">Size (optional)</label>
+        <input type="text" id="newProductSizeInput" placeholder="e.g. 250ml, 25kg" />
+      </div>
+      <div class="field">
+        <label for="newProductPriceInput">Price (optional)</label>
+        <input type="number" id="newProductPriceInput" min="0" step="0.01" inputmode="decimal" placeholder="0.00" />
+      </div>
+      <button id="addProductBtn" class="btn btn-primary btn-block">Add Product</button>
+      <button id="cancelEditProductBtn" class="link-btn" style="display:none;">Cancel edit</button>
+    </div>
+
+    <h2 class="section-heading">Current Products</h2>
+
+    <div id="productsLoading" class="spinner-wrap">
+      <div class="spinner"></div>
+    </div>
+
+    <ul id="productsList" class="simple-list product-manage-list" style="display:none;"></ul>
+  </section>
+
+  <!-- ============================================================
+       FOOTER CREDIT — lives outside the screen toggles, so it is
+       always rendered below whichever screen is active.
+       ============================================================ -->
+  <footer class="app-footer">
+    App by <a href="https://digiwizr.com/" target="_blank" rel="noopener noreferrer">Digiwizr</a>
+  </footer>
+
+</div>
+
+<!-- ============================================================
+     SETUP COMPLETE MODAL — shows the recovery PIN, cannot be
+     dismissed except via its single confirmation button.
+     ============================================================ -->
+<div id="setupCompleteModal" class="modal-overlay" style="display:none;">
+  <div class="modal-card">
+    <h2 class="modal-title">Setup Complete</h2>
+    <p class="modal-text">Your Recovery PIN is:</p>
+    <div id="modalRecoveryPin" class="modal-pin"></div>
+    <p class="modal-text">Write this down and keep it safe. You will need it to restore access on a new device.</p>
+    <button id="modalConfirmBtn" class="btn btn-primary btn-block">I have saved my PIN</button>
+  </div>
+</div>
+
+<!-- ============================================================
+     iOS SAFARI "ADD TO HOME SCREEN" BANNER
+     ============================================================ -->
+<div id="iosInstallBanner" class="ios-install-banner">
+  <div class="ios-banner-content">
+    <svg class="ios-banner-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 3v12" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M8 7l4-4 4 4" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M6 12v7a2 2 0 002 2h8a2 2 0 002-2v-7" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span class="ios-banner-text">
+      Install this app: tap the Share button below then select <strong>Add to Home Screen</strong>
+    </span>
+    <svg class="ios-banner-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 4v14" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M6 13l6 6 6-6" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </div>
+  <button id="iosBannerClose" class="ios-banner-close" aria-label="Dismiss install instructions">&times;</button>
+</div>
+
+<script src="app.js"></script>
+<script>
+  // Register the service worker so the app shell is cached and works offline
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(err => {
+        console.warn('Service worker registration failed:', err);
+      });
+    });
+  }
+</script>
+</body>
+</html>
