@@ -1,0 +1,922 @@
+/**
+ * ============================================================
+ * DIGIWIZR SALES TRACKER — GOOGLE APPS SCRIPT BACKEND
+ * Deploy as Web App (Execute as: Me, Access: Anyone)
+ * ============================================================
+ */
+
+var MASTER_SHEET_NAME = "Digiwizr Clients";
+var VALID_ENTRY_TABS = ["Sales", "Expenses", "Collections"]; // whitelist for deleteEntry
+
+/* =========================================================
+   ENTRY POINTS
+   ========================================================= */
+
+function doGet(e) {
+  return handleRequest(e);
+}
+
+function doPost(e) {
+  return handleRequest(e);
+}
+
+// Some browsers send an OPTIONS preflight for POST requests.
+// Apps Script can't fully control preflight headers, but this
+// avoids a hard error if one comes through.
+function doOptions(e) {
+  return ContentService.createTextOutput("");
+}
+
+function handleRequest(e) {
+  var params = {};
+
+  try {
+    if (e.postData && e.postData.contents) {
+      // POST with a JSON body
+      params = JSON.parse(e.postData.contents);
+    } else if (e.parameter) {
+      // GET query params, or POST form-encoded params
+      params = e.parameter;
+    }
+  } catch (parseErr) {
+    params = e.parameter || {};
+  }
+
+  var action = params.action;
+  var result;
+
+  try {
+    switch (action) {
+      case "setupClient":
+        result = setupClient(params.businessName, params.phone, params.email, params.address);
+        break;
+
+      case "recoverAccount":
+        result = recoverAccount(params.recoveryPIN);
+        break;
+
+      case "getProducts":
+        result = getProducts(params.sheetId);
+        break;
+
+      case "addProduct":
+        result = addProduct(params.sheetId, params.name, params.size, params.cost, params.price);
+        break;
+
+      case "updateProduct":
+        result = updateProduct(params.sheetId, params.rowIndex, params.name, params.size, params.cost, params.price);
+        break;
+
+      case "deleteProduct":
+        result = deleteProduct(params.sheetId, params.rowIndex);
+        break;
+
+      case "saveSale":
+        result = saveSale(params.sheetId, params.itemName, params.quantity, params.sellPrice, params.costPrice, params.notes);
+        break;
+
+      case "saveExpense":
+        result = saveExpense(params.sheetId, params.description, params.amount);
+        break;
+
+      case "saveCollection":
+        result = saveCollection(params.sheetId, params.description, params.amount);
+        break;
+
+      case "deleteEntry":
+        result = deleteEntry(params.sheetId, params.tabName, params.rowIndex);
+        break;
+
+      case "getDailySummary":
+        result = getDailySummary(params.sheetId);
+        break;
+
+      case "getRecentEntries":
+        result = getRecentEntries(params.sheetId);
+        break;
+
+      case "getDailyReport":
+        result = getDailyReport(params.sheetId, params.date);
+        break;
+
+      default:
+        result = { success: false, error: "Unknown or missing action: '" + action + "'" };
+    }
+  } catch (err) {
+    result = { success: false, error: err.message };
+  }
+
+  return jsonOutput(result);
+}
+
+/* =========================================================
+   setupClient
+   ========================================================= */
+
+/**
+ * Creates a brand-new client sheet from scratch at signup time.
+ * Every tab is born with its final column structure here — no
+ * migration or patch function is needed for sheets created by
+ * this function, only for sheets that predate this version.
+ */
+function setupClient(businessName, phone, email, address) {
+  try {
+    // --- Validate required fields ---
+    if (!businessName || String(businessName).trim() === "") {
+      throw new Error("businessName is required");
+    }
+    if (!phone || String(phone).trim() === "") {
+      throw new Error("phone is required");
+    }
+    if (!email || String(email).trim() === "") {
+      throw new Error("email is required");
+    }
+
+    var recoveryPIN = generateUniqueRecoveryPIN();
+    var dateCreated = formatDateDDMMYYYY(new Date());
+
+    // --- Create the spreadsheet itself ---
+    var ss = SpreadsheetApp.create(businessName);
+    var sheetId = ss.getId();
+    var sheetURL = ss.getUrl();
+
+    // --- Products tab: 4 columns from the moment of creation ---
+    // A: Item Name | B: Size | C: Cost | D: Price
+    var productsSheet = ss.getSheets()[0];
+    productsSheet.setName("Products");
+    productsSheet.getRange(1, 1, 1, 4).setValues([["Item Name", "Size", "Cost", "Price"]]);
+
+    // --- Sales tab: 6 columns ---
+    // A: Date | B: Item Name | C: Quantity | D: Sell Price | E: Cost Price | F: Notes
+    var salesSheet = ss.insertSheet("Sales");
+    salesSheet.getRange(1, 1, 1, 6).setValues([["Date", "Item Name", "Quantity", "Sell Price", "Cost Price", "Notes"]]);
+
+    // --- Expenses tab ---
+    var expensesSheet = ss.insertSheet("Expenses");
+    expensesSheet.getRange(1, 1, 1, 3).setValues([["Date", "Description", "Amount"]]);
+
+    // --- Collections tab ---
+    var collectionsSheet = ss.insertSheet("Collections");
+    collectionsSheet.getRange(1, 1, 1, 3).setValues([["Date", "Description", "Amount"]]);
+
+    // --- About tab: 7 label/value rows, Email Address at row 3 ---
+    var aboutSheet = ss.insertSheet("About");
+    aboutSheet.getRange(1, 1, 7, 2).setValues([
+      ["Business Name", businessName],
+      ["Phone Number", phone],
+      ["Email Address", email],
+      ["Business Address", address || ""],
+      ["Sheet ID", sheetId],
+      ["Recovery PIN", recoveryPIN],
+      ["Date Created", dateCreated]
+    ]);
+
+    // --- Record this client in the master "Digiwizr Clients" sheet ---
+    addClientToMasterSheet(businessName, phone, email, address, sheetId, sheetURL, recoveryPIN, dateCreated);
+
+    return {
+      success: true,
+      sheetId: sheetId,
+      sheetURL: sheetURL,
+      recoveryPIN: recoveryPIN
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Appends one row to the master "Digiwizr Clients" sheet in the
+ * fixed 8-column order: Business Name, Phone Number, Email Address,
+ * Business Address, Sheet ID, Sheet URL, Recovery PIN, Date Created.
+ */
+function addClientToMasterSheet(businessName, phone, email, address, sheetId, sheetURL, recoveryPIN, dateCreated) {
+  var masterSs = getOrCreateMasterSheet();
+  var sheet = masterSs.getSheets()[0];
+  sheet.appendRow([businessName, phone, email, address || "", sheetId, sheetURL, recoveryPIN, dateCreated]);
+}
+
+/**
+ * Opens the master "Digiwizr Clients" sheet, creating it (with the
+ * correct 8-column header row) if it doesn't exist yet.
+ */
+function getOrCreateMasterSheet() {
+  var files = DriveApp.getFilesByName(MASTER_SHEET_NAME);
+
+  if (files.hasNext()) {
+    var file = files.next();
+    return SpreadsheetApp.open(file);
+  }
+
+  var ss = SpreadsheetApp.create(MASTER_SHEET_NAME);
+  var sheet = ss.getSheets()[0];
+  sheet.setName("Clients");
+  sheet.getRange(1, 1, 1, 8).setValues([
+    ["Business Name", "Phone Number", "Email Address", "Business Address", "Sheet ID", "Sheet URL", "Recovery PIN", "Date Created"]
+  ]);
+  return ss;
+}
+
+/**
+ * Generates a random 6-digit numeric PIN, retrying until one is
+ * found that doesn't already exist in the master sheet.
+ */
+function generateUniqueRecoveryPIN() {
+  var pin;
+  var attempts = 0;
+  do {
+    pin = String(Math.floor(100000 + Math.random() * 900000));
+    attempts++;
+    if (attempts > 50) throw new Error("Could not generate a unique recovery PIN");
+  } while (recoveryPinExists(pin));
+  return pin;
+}
+
+/**
+ * Detects whether a master-sheet row (read as an 8-column array) is
+ * in the old pre-Email 7-column layout or the current 8-column one.
+ * Date Created is always populated for a legitimate row and always
+ * sits in the last real column — column H (index 7) for new rows,
+ * but genuinely blank there for old rows since they only ever wrote
+ * columns A-G. That makes it a reliable format signal.
+ */
+function isNewMasterRowFormat(row) {
+  return row[7] !== "" && row[7] !== null && row[7] !== undefined;
+}
+
+function recoveryPinExists(pin) {
+  var masterSs = getOrCreateMasterSheet();
+  var sheet = masterSs.getSheets()[0];
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+
+  var rows = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var rowPin = isNewMasterRowFormat(row) ? row[6] : row[5]; // new: col G, old: col F
+    if (String(rowPin) === String(pin)) return true;
+  }
+  return false;
+}
+
+/* =========================================================
+   recoverAccount
+   ========================================================= */
+
+function recoverAccount(recoveryPIN) {
+  try {
+    if (!recoveryPIN) throw new Error("recoveryPIN is required");
+
+    var masterSs = getOrCreateMasterSheet();
+    var sheet = masterSs.getSheets()[0];
+    var lastRow = sheet.getLastRow();
+
+    if (lastRow < 2) {
+      return { success: false, error: "Recovery PIN not found" };
+    }
+
+    var rows = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var isNewFormat = isNewMasterRowFormat(row);
+      var businessName = row[0];
+      var sheetId = isNewFormat ? row[4] : row[3]; // new: col E, old: col D
+      var rowPin = isNewFormat ? row[6] : row[5]; // new: col G, old: col F
+
+      if (String(rowPin) === String(recoveryPIN)) {
+        return { success: true, sheetId: sheetId, businessName: businessName };
+      }
+    }
+
+    return { success: false, error: "Recovery PIN not found" };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/* =========================================================
+   getProducts / addProduct / updateProduct / deleteProduct
+   ========================================================= */
+
+/**
+ * Checks whether the Products tab on an already-open spreadsheet
+ * has the Cost column (header "Cost" in C1). If not, inserts it —
+ * new column C, header set, existing Price data shifted intact to
+ * D, new Cost cells left blank. Returns true if a migration ran.
+ * Shared by getProducts / addProduct / updateProduct so each can
+ * self-heal a legacy Products tab before proceeding.
+ */
+function ensureProductsCostColumnForSs(ss) {
+  var sheet = ss.getSheetByName("Products");
+  if (!sheet) return false;
+  if (sheet.getLastRow() < 1) return false;
+
+  var header = sheet.getRange(1, 1, 1, 3).getValues()[0];
+  if (String(header[2]).trim() === "Cost") return false; // already migrated
+
+  sheet.insertColumnAfter(2); // new column C, pushes old Price (C) to D
+  sheet.getRange("C1").setValue("Cost");
+  return true;
+}
+
+/**
+ * One-time migration entry point, callable manually from the Apps
+ * Script editor for a specific client sheet. Opens the sheet by ID
+ * and runs the same check-and-fix logic used automatically inside
+ * getProducts / addProduct / updateProduct. Safe to call repeatedly
+ * — does nothing if the Cost column already exists.
+ */
+function migrateProductsTab(sheetId) {
+  var ss = SpreadsheetApp.openById(sheetId);
+  var migrated = ensureProductsCostColumnForSs(ss);
+  return migrated ? "Cost column inserted." : "Cost column already present, no changes made.";
+}
+
+function getProducts(sheetId) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    ensureProductsCostColumnForSs(ss);
+
+    var sheet = ss.getSheetByName("Products");
+    if (!sheet) throw new Error("Products tab not found");
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return { success: true, products: [] };
+    }
+
+    var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+    var products = [];
+
+    for (var i = 0; i < values.length; i++) {
+      var row = values[i];
+      if (row[0] === "" || row[0] === null || row[0] === undefined) continue;
+      products.push({
+        name: row[0],
+        size: row[1] || "",
+        cost: safeNum(row[2]),
+        price: safeNum(row[3]),
+        rowIndex: i + 2 // actual sheet row number (data starts at row 2)
+      });
+    }
+
+    products.sort(function (a, b) {
+      return String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase());
+    });
+
+    return { success: true, products: products };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function addProduct(sheetId, name, size, cost, price) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!name || String(name).trim() === "") throw new Error("name is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    ensureProductsCostColumnForSs(ss);
+
+    var sheet = ss.getSheetByName("Products");
+    if (!sheet) throw new Error("Products tab not found");
+
+    sheet.appendRow([name, size || "", cost || "", price || ""]);
+
+    return { success: true, message: "Product added successfully" };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * NOTE: this function was on an earlier "do not modify" list, but
+ * a prior change explicitly required updateProduct to save/retrieve
+ * Cost — without this, editing a product could never set or change
+ * its Cost value, even though adding a new one could. Kept updated
+ * here since this round's instructions place updateProduct outside
+ * the protected list.
+ */
+function updateProduct(sheetId, rowIndex, name, size, cost, price) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!rowIndex || Number(rowIndex) < 2) throw new Error("A valid rowIndex is required");
+    if (!name || String(name).trim() === "") throw new Error("name is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    ensureProductsCostColumnForSs(ss);
+
+    var sheet = ss.getSheetByName("Products");
+    if (!sheet) throw new Error("Products tab not found");
+
+    sheet.getRange(Number(rowIndex), 1, 1, 4).setValues([[name, size || "", cost || "", price || ""]]);
+
+    return { success: true, message: "Product updated successfully" };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function deleteProduct(sheetId, rowIndex) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!rowIndex || Number(rowIndex) < 2) throw new Error("A valid rowIndex is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sheet = ss.getSheetByName("Products");
+    if (!sheet) throw new Error("Products tab not found");
+
+    sheet.deleteRow(Number(rowIndex));
+
+    return { success: true, message: "Product deleted successfully" };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/* =========================================================
+   saveSale / saveExpense / saveCollection
+   ========================================================= */
+
+function saveSale(sheetId, itemName, quantity, sellPrice, costPrice, notes) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!itemName) throw new Error("itemName is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sheet = ss.getSheetByName("Sales");
+    if (!sheet) throw new Error("Sales tab not found");
+
+    var dateStr = formatDateDDMMYYYY(new Date());
+    var sellPriceNum = safeNum(sellPrice);
+    var costPriceNum = safeNum(costPrice);
+    sheet.appendRow([dateStr, itemName, quantity || "", sellPriceNum, costPriceNum, notes || ""]);
+
+    return { success: true, message: "Sale saved successfully", rowIndex: sheet.getLastRow() };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function saveExpense(sheetId, description, amount) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!description) throw new Error("description is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sheet = ss.getSheetByName("Expenses");
+    if (!sheet) throw new Error("Expenses tab not found");
+
+    var dateStr = formatDateDDMMYYYY(new Date());
+    sheet.appendRow([dateStr, description, amount || ""]);
+
+    return { success: true, message: "Expense saved successfully", rowIndex: sheet.getLastRow() };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function saveCollection(sheetId, description, amount) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (amount === undefined || amount === null || String(amount).trim() === "") {
+      throw new Error("amount is required");
+    }
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sheet = ss.getSheetByName("Collections");
+
+    // Backward compatibility: older client sheets may not have this tab yet
+    if (!sheet) {
+      sheet = ss.insertSheet("Collections");
+      sheet.getRange("A1:C1").setValues([["Date", "Description", "Amount"]]);
+    }
+
+    var dateStr = formatDateDDMMYYYY(new Date());
+    sheet.appendRow([dateStr, description || "", amount]);
+
+    return { success: true, message: "Collection saved successfully", rowIndex: sheet.getLastRow() };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/* =========================================================
+   deleteEntry
+   ========================================================= */
+
+function deleteEntry(sheetId, tabName, rowIndex) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (VALID_ENTRY_TABS.indexOf(tabName) === -1) {
+      throw new Error("Invalid tabName. Must be one of: " + VALID_ENTRY_TABS.join(", "));
+    }
+    if (!rowIndex || Number(rowIndex) < 2) throw new Error("A valid rowIndex is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sheet = ss.getSheetByName(tabName);
+    if (!sheet) throw new Error(tabName + " tab not found");
+
+    sheet.deleteRow(Number(rowIndex));
+
+    return { success: true, message: "Entry deleted successfully" };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/* =========================================================
+   getDailySummary
+   ========================================================= */
+
+function getDailySummary(sheetId) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var today = formatDateDDMMYYYY(new Date());
+
+    var salesTotals = sumSalesRevenueAndCostToday(ss, today); // { revenue, cost } from Quantity x Sell/Cost Price
+    var collectionsToday = sumTodayColumn(ss, "Collections", 2); // Amount is column C (index 2)
+    var expensesToday = sumTodayColumn(ss, "Expenses", 2); // Amount is column C (index 2)
+
+    var rawRevenue = salesTotals.revenue + collectionsToday;
+    var rawProfit = rawRevenue - salesTotals.cost - expensesToday;
+
+    var revenue = roundTo2(rawRevenue);
+    var profit = roundTo2(rawProfit);
+    var profitPercentage = revenue === 0 ? 0 : roundTo2((rawProfit / rawRevenue) * 100);
+
+    return {
+      success: true,
+      revenue: revenue,
+      profit: profit,
+      profitPercentage: profitPercentage
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Parses a value to a number, safely returning 0 for blanks,
+ * non-numeric text, or missing cells — used so that Sales rows
+ * saved before the Sell Price / Cost Price columns existed never
+ * throw, they just contribute 0 to the totals.
+ */
+function safeNum(value) {
+  var n = parseFloat(value);
+  return isNaN(n) ? 0 : n;
+}
+
+function roundTo2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Sums (Quantity x Sell Price) and (Quantity x Cost Price) across
+ * all Sales rows dated today. Sales tab columns: A Date, B Item
+ * Name, C Quantity, D Sell Price, E Cost Price, F Notes.
+ */
+function sumSalesRevenueAndCostToday(ss, today) {
+  var sheet = ss.getSheetByName("Sales");
+  if (!sheet) return { revenue: 0, cost: 0 };
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { revenue: 0, cost: 0 };
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 5).getValues(); // A:E
+  var revenue = 0;
+  var cost = 0;
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (dateCellToDDMMYYYY(row[0]) === today) {
+      var quantity = safeNum(row[2]);
+      var sellPrice = safeNum(row[3]);
+      var costPrice = safeNum(row[4]);
+      revenue += quantity * sellPrice;
+      cost += quantity * costPrice;
+    }
+  }
+
+  return { revenue: revenue, cost: cost };
+}
+
+/**
+ * Sums the given column (0-indexed within the row) for every row
+ * in sheetName whose Date column (A) matches today's date.
+ * Returns 0 if the tab doesn't exist (e.g. older sheets without
+ * a Collections tab) rather than throwing.
+ */
+function sumTodayColumn(ss, sheetName, valueColIndex) {
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return 0;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+
+  var today = formatDateDDMMYYYY(new Date());
+  var values = sheet.getRange(2, 1, lastRow - 1, valueColIndex + 1).getValues();
+  var total = 0;
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (dateCellToDDMMYYYY(row[0]) === today) {
+      total += safeNum(row[valueColIndex]);
+    }
+  }
+
+  return total;
+}
+
+/* =========================================================
+   getRecentEntries
+   ========================================================= */
+
+function getRecentEntries(sheetId) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+
+    var salesEntries = getLastNEntries(ss, "Sales", 5, 1, 2); // label col B, value col C
+    var expenseEntries = getLastNEntries(ss, "Expenses", 5, 1, 2);
+    var collectionEntries = getLastNEntries(ss, "Collections", 5, 1, 2);
+
+    var combined = salesEntries.concat(expenseEntries, collectionEntries);
+
+    combined.sort(function (a, b) {
+      var dateDiff = parseDDMMYYYY(b.date) - parseDDMMYYYY(a.date);
+      if (dateDiff !== 0) return dateDiff;
+      return b.rowIndex - a.rowIndex; // same-day tiebreaker: most recently added first
+    });
+
+    return { success: true, entries: combined.slice(0, 5) };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Reads the last n data rows from sheetName and returns them as
+ * normalized entry objects: { tab, date, label, value, rowIndex }.
+ * Returns [] if the tab doesn't exist.
+ */
+function getLastNEntries(ss, sheetName, n, labelColIndex, valueColIndex) {
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var numCols = Math.max(labelColIndex, valueColIndex) + 1;
+  var startRow = Math.max(2, lastRow - n + 1);
+  var numRows = lastRow - startRow + 1;
+  var values = sheet.getRange(startRow, 1, numRows, numCols).getValues();
+
+  var entries = [];
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (row[0] === "" || row[0] === null) continue;
+    entries.push({
+      tab: sheetName,
+      date: dateCellToDDMMYYYY(row[0]),
+      label: row[labelColIndex],
+      value: row[valueColIndex],
+      rowIndex: startRow + i
+    });
+  }
+
+  return entries;
+}
+
+function parseDDMMYYYY(dateStr) {
+  var parts = String(dateStr).split("/");
+  if (parts.length !== 3) return 0;
+  var day = parseInt(parts[0], 10);
+  var month = parseInt(parts[1], 10) - 1;
+  var year = parseInt(parts[2], 10);
+  return new Date(year, month, day).getTime();
+}
+
+/* =========================================================
+   getDailyReport
+   ========================================================= */
+
+function getDailyReport(sheetId, date) {
+  try {
+    if (!sheetId) throw new Error("sheetId is required");
+    if (!date) throw new Error("date is required");
+
+    var ss = SpreadsheetApp.openById(sheetId);
+    var sizeByProductName = buildProductSizeLookup(ss);
+
+    var sales = readSalesForDate(ss, date, sizeByProductName);
+    var collections = readDescriptionAmountRowsForDate(ss, "Collections", date);
+    var expenses = readDescriptionAmountRowsForDate(ss, "Expenses", date);
+
+    sales.sort(function (a, b) {
+      return String(a.itemName).toLowerCase().localeCompare(String(b.itemName).toLowerCase());
+    });
+
+    var totalSales = 0;
+    var costOfGoodsSold = 0;
+    for (var i = 0; i < sales.length; i++) {
+      totalSales += sales[i].quantity * sales[i].sellPrice;
+      costOfGoodsSold += sales[i].quantity * sales[i].costPrice;
+    }
+
+    var totalCollections = sumAmountField(collections);
+    var totalExpenses = sumAmountField(expenses);
+    var totalCashIn = totalSales + totalCollections;
+    var grossProfit = totalCashIn - totalExpenses - costOfGoodsSold;
+    var profitPercentage = totalCashIn === 0 ? 0 : Math.round((grossProfit / totalCashIn) * 1000) / 10;
+
+    return {
+      success: true,
+      sales: sales,
+      collections: collections,
+      expenses: expenses,
+      summary: {
+        totalSales: roundTo2(totalSales),
+        totalCollections: roundTo2(totalCollections),
+        totalCashIn: roundTo2(totalCashIn),
+        totalExpenses: roundTo2(totalExpenses),
+        costOfGoodsSold: roundTo2(costOfGoodsSold),
+        grossProfit: roundTo2(grossProfit),
+        profitPercentage: profitPercentage
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Builds a { "product name": "size" } lookup from the Products tab,
+ * so Sales rows (which don't store Size) can show it in the report.
+ * Returns an empty object if the Products tab is missing or empty.
+ */
+function buildProductSizeLookup(ss) {
+  var lookup = {};
+  var sheet = ss.getSheetByName("Products");
+  if (!sheet) return lookup;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return lookup;
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 2).getValues(); // A: name, B: size
+  for (var i = 0; i < values.length; i++) {
+    var name = values[i][0];
+    if (name === "" || name === null || name === undefined) continue;
+    lookup[String(name)] = values[i][1] || "";
+  }
+  return lookup;
+}
+
+/**
+ * Reads every Sales row matching the given DD/MM/YYYY date and
+ * returns { itemName, size, quantity, sellPrice, costPrice } objects.
+ * Size comes from the Products lookup; if the product no longer
+ * exists (e.g. deleted after the sale), size is returned as "".
+ */
+function readSalesForDate(ss, date, sizeByProductName) {
+  var sheet = ss.getSheetByName("Sales");
+  if (!sheet) return [];
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 5).getValues(); // A:E
+  var results = [];
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (dateCellToDDMMYYYY(row[0]) !== date) continue;
+
+    var itemName = row[1];
+    results.push({
+      itemName: itemName,
+      size: sizeByProductName[String(itemName)] || "",
+      quantity: safeNum(row[2]),
+      sellPrice: safeNum(row[3]),
+      costPrice: safeNum(row[4])
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Reads every row matching the given DD/MM/YYYY date from a simple
+ * Date/Description/Amount tab (Collections or Expenses) and returns
+ * { description, amount } objects.
+ */
+function readDescriptionAmountRowsForDate(ss, sheetName, date) {
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return [];
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 3).getValues(); // A:C
+  var results = [];
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (dateCellToDDMMYYYY(row[0]) !== date) continue;
+
+    results.push({
+      description: row[1] || "",
+      amount: safeNum(row[2])
+    });
+  }
+
+  return results;
+}
+
+function sumAmountField(entries) {
+  var total = 0;
+  for (var i = 0; i < entries.length; i++) {
+    total += entries[i].amount;
+  }
+  return total;
+}
+
+/* =========================================================
+   UTILITIES
+   ========================================================= */
+
+function formatDateDDMMYYYY(date) {
+  var tz = Session.getScriptTimeZone();
+  return Utilities.formatDate(date, tz, "dd/MM/yyyy");
+}
+
+/**
+ * Normalizes a date cell's value to a "dd/MM/yyyy" string, whether
+ * Sheets stored it as the literal text we wrote or silently
+ * auto-converted it to a real Date value (this depends on the
+ * spreadsheet's locale and happens outside our control). Always
+ * compare/sort using this instead of the raw cell value.
+ */
+function dateCellToDDMMYYYY(value) {
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    return formatDateDDMMYYYY(value);
+  }
+  return String(value);
+}
+
+function jsonOutput(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/* =========================================================
+   ONE-TIME MIGRATION UTILITIES (not part of the request router)
+   Callable manually from the Apps Script editor for a specific
+   legacy client sheet — never triggered by the web app itself.
+   ========================================================= */
+
+/**
+ * Fixes the About tab of a client sheet created before the Email
+ * field existed. Checks whether row 3, column A already says
+ * "Email Address" — if so, does nothing. Otherwise inserts a new
+ * row 3 with "Email Address" / the given email, shifting Business
+ * Address, Sheet ID, Recovery PIN, and Date Created down by one row.
+ */
+function patchAboutTab(sheetId, email) {
+  var ss = SpreadsheetApp.openById(sheetId);
+  var aboutSheet = ss.getSheetByName("About");
+  if (!aboutSheet) return "About tab not found.";
+
+  var row3Label = aboutSheet.getRange(3, 1).getValue();
+  if (String(row3Label) === "Email Address") {
+    return "Email Address row already present at row 3, no changes made.";
+  }
+
+  aboutSheet.insertRowBefore(3);
+  aboutSheet.getRange(3, 1, 1, 2).setValues([["Email Address", email || ""]]);
+  return "Email Address row inserted at row 3.";
+}
+
+/**
+ * EXAMPLE — edit the sheetId and email below for the client you're
+ * migrating, then select "runMigrationExample" in the function
+ * dropdown at the top of the Apps Script editor and click Run.
+ * Runs both migrations for that one client sheet. Safe to re-run.
+ */
+function runMigrationExample() {
+  var sheetId = "PASTE_THE_CLIENT_SHEET_ID_HERE";
+  var email = "client-email@example.com";
+
+  var productsResult = migrateProductsTab(sheetId);
+  var aboutResult = patchAboutTab(sheetId, email);
+
+  Logger.log("Products tab: " + productsResult);
+  Logger.log("About tab: " + aboutResult);
+}
